@@ -98,6 +98,52 @@ class TestHyperVUtilsV2(base.BaseTestCase):
         self._utils.clear_port_sg_acls_cache(mock.sentinel.port_id)
         self.assertNotIn(mock.sentinel.acl, self._utils._sg_acl_sds)
 
+    @mock.patch.object(utilsv2.threading, 'Thread')
+    @mock.patch.object(utilsv2.HyperVUtilsV2, '_get_event_wql_query')
+    def test_subscribe_vnic_event(self, mock_get_event_query, mock_Thread):
+        callback = mock.MagicMock()
+        port_class = self._utils._conn.Msvm_SyntheticEthernetPortSettingData
+        listener = port_class.watch_for.return_value
+
+        self._utils.subscribe_vnic_event(callback,
+                                         self._utils.EVENT_TYPE_CREATE)
+
+        mock_get_event_query.assert_called_once_with(
+            cls=self._utils._VNIC_SET_DATA,
+            event_type=self._utils.EVENT_TYPE_CREATE,
+            timeframe=2)
+        mock_Thread.assert_called_once_with(target=self._utils._poll_events,
+                                            args=(listener, callback))
+        self.assertTrue(mock_Thread.return_value.start.called)
+
+    @mock.patch.object(utilsv2, 'wmi', create=True)
+    def test_poll_events(self, mock_wmi):
+        mock_wmi.x_wmi_timed_out = ValueError
+        event = mock.MagicMock()
+        listener = mock.MagicMock(
+            side_effect=[mock_wmi.x_wmi_timed_out, event])
+        callback = mock.MagicMock(side_effect=TypeError)
+
+        self.assertRaises(TypeError, self._utils._poll_events,
+                          listener, callback)
+
+        listener.assert_has_calls(
+            [mock.call(self._utils._VNIC_LISTENER_TIMEOUT_MS)] * 2)
+        callback.assert_called_once_with(event.ElementName)
+
+    def test_get_event_wql_query(self):
+        expected = ("SELECT * FROM %(event_type)s WITHIN %(timeframe)s "
+                    "WHERE TargetInstance ISA '%(class)s' AND "
+                    "%(like)s" % {'class': "FakeClass",
+                                  'event_type': self._utils.EVENT_TYPE_CREATE,
+                                  'like': "TargetInstance.foo LIKE 'bar%'",
+                                  'timeframe': 2})
+
+        query = self._utils._get_event_wql_query(
+            "FakeClass", self._utils.EVENT_TYPE_CREATE, like=dict(foo="bar"))
+
+        self.assertEqual(expected, query)
+
     def test_connect_vnic_to_vswitch_found(self):
         self._test_connect_vnic_to_vswitch(True)
 

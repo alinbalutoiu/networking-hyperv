@@ -361,18 +361,17 @@ networking-plugin-hyperv_agent.html
             self._port_unbound(port_id)
             self.sec_groups_agent.remove_devices_filter([port_id])
 
-    def _treat_devices_added(self, devices):
+    def _treat_devices_added(self):
         try:
             devices_details_list = self.plugin_rpc.get_devices_details_list(
                 self.context,
-                devices,
+                self._added_ports,
                 self.agent_id)
         except Exception as e:
             LOG.debug("Unable to get ports details for "
                       "devices %(devices)s: %(e)s",
-                      {'devices': devices, 'e': e})
-            # resync is needed
-            return True
+                      {'devices': self._added_ports, 'e': e})
+            return
 
         for device_details in devices_details_list:
             device = device_details['device']
@@ -393,11 +392,13 @@ networking-plugin-hyperv_agent.html
                                                  device,
                                                  self.agent_id,
                                                  self._host)
-        return False
 
-    def _treat_devices_removed(self, devices):
-        resync = False
-        for device in devices:
+            # if the port bind was successful, remove the port from added ports
+            # set, so it doesn't get reprocessed.
+            self._added_ports.discard(device)
+
+    def _treat_devices_removed(self):
+        for device in list(self._removed_ports):
             LOG.info(_LI("Removing port %s"), device)
             try:
                 self.plugin_rpc.update_device_down(self.context,
@@ -407,44 +408,44 @@ networking-plugin-hyperv_agent.html
             except Exception as e:
                 LOG.debug("Removing port failed for device %(device)s: %(e)s",
                           dict(device=device, e=e))
-                resync = True
                 continue
-            self._port_unbound(device, vnic_deleted=True)
-        return resync
 
-    def _process_network_ports(self, port_info):
-        resync_a = False
-        resync_b = False
-        if 'added' in port_info:
-            resync_a = self._treat_devices_added(port_info['added'])
-        if 'removed' in port_info:
-            resync_b = self._treat_devices_removed(port_info['removed'])
-        # If one of the above operations fails => resync with plugin
-        return (resync_a | resync_b)
+            self._port_unbound(device, vnic_deleted=True)
+            self.sec_groups_agent.remove_devices_filter([device])
+
+            # if the port unbind was successful, remove the port from removed
+            # set, so it won't be reprocessed.
+            self._removed_ports.discard(device)
+
+    def _process_added_port_event(self, port_name):
+        LOG.info(_LI("Hyper-V VM vNIC added: %s"), port_name)
+        self._added_ports.add(port_name)
+
+    def _process_removed_port_event(self, port_name):
+        LOG.info(_LI("Hyper-V VM vNIC removed: %s"), port_name)
+        self._removed_ports.add(port_name)
 
     def daemon_loop(self):
-        # init NVGRE after the RPC connection and context is created.
-        self._init_nvgre()
+        self._added_ports = self._utils.get_vnic_ids()
+        self._removed_ports = set()
 
-        sync = True
-        ports = set()
+        self._utils.subscribe_vnic_event(self._process_added_port_event,
+                                         self._utils.EVENT_TYPE_CREATE)
+        self._utils.subscribe_vnic_event(self._process_removed_port_event,
+                                         self._utils.EVENT_TYPE_DELETE)
 
         while True:
             try:
                 start = time.time()
-                if sync:
-                    LOG.info(_LI("Agent out of sync with plugin!"))
-                    ports.clear()
-                    sync = False
-
-                port_info = self._update_ports(ports)
 
                 # notify plugin about port deltas
-                if port_info:
+                if self._added_ports:
                     LOG.debug("Agent loop has new devices!")
-                    # If treat devices fails - must resync with plugin
-                    sync = self._process_network_ports(port_info)
-                    ports = port_info['current']
+                    self._treat_devices_added()
+
+                if self._removed_ports:
+                    LOG.debug("Agent loop has lost devices...")
+                    self._treat_devices_removed()
 
                 if self._nvgre_enabled:
                     self._nvgre_ops.refresh_nvgre_records()

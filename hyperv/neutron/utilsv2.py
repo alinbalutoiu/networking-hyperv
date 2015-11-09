@@ -14,6 +14,8 @@
 #    under the License.
 
 import re
+import sys
+import threading
 
 from eventlet import greenthread
 
@@ -22,6 +24,9 @@ from hyperv.neutron import utils
 
 
 class HyperVUtilsV2(utils.HyperVUtils):
+
+    EVENT_TYPE_CREATE = "__InstanceCreationEvent"
+    EVENT_TYPE_DELETE = "__InstanceDeletionEvent"
 
     _EXTERNAL_PORT = 'Msvm_ExternalEthernetPort'
     _ETHERNET_SWITCH_PORT = 'Msvm_EthernetSwitchPort'
@@ -66,6 +71,8 @@ class HyperVUtilsV2(utils.HyperVUtils):
 
     # 2 directions x 2 address types = 4 ACLs
     _REJECT_ACLS_COUNT = 4
+
+    _VNIC_LISTENER_TIMEOUT_MS = 2000
 
     _wmi_namespace = '//./root/virtualization/v2'
 
@@ -116,6 +123,51 @@ class HyperVUtilsV2(utils.HyperVUtils):
 
     def clear_port_sg_acls_cache(self, switch_port_name):
         self._sg_acl_sds.pop(switch_port_name, None)
+
+    def subscribe_vnic_event(self, callback, event):
+        query = self._get_event_wql_query(cls=self._VNIC_SET_DATA,
+                                          event_type=event,
+                                          timeframe=2)
+        listener = self._conn.Msvm_SyntheticEthernetPortSettingData.watch_for(
+            query)
+
+        thread = threading.Thread(target=self._poll_events,
+                                  args=(listener, callback))
+        thread.start()
+
+    def _poll_events(self, listener, callback):
+        while True:
+            # Retrieve one by one all the events that occurred in
+            # the checked interval.
+            try:
+                event = listener(self._VNIC_LISTENER_TIMEOUT_MS)
+                callback(event.ElementName)
+            except wmi.x_wmi_timed_out:
+                # no new event published.
+                pass
+
+    def _get_event_wql_query(self, cls, event_type, timeframe=2, **where):
+        """Return a WQL query used for polling WMI events.
+
+            :param cls: the Hyper-V class polled for events.
+            :param event_type: the type of event expected.
+            :param timeframe: check for events that occurred in
+                              the specified timeframe.
+            :param where: key-value arguments which are to be included in the
+                          query. For example: like=dict(foo="bar").
+        """
+        like = where.pop('like', {})
+        like_str = " AND ".join("TargetInstance.%s LIKE '%s%%'" % (k, v)
+                                for k, v in like.items())
+        like_str = "AND " + like_str if like_str else ""
+
+        query = ("SELECT * FROM %(event_type)s WITHIN %(timeframe)s "
+                 "WHERE TargetInstance ISA '%(class)s' %(like)s" % {
+                     'class': cls,
+                     'event_type': event_type,
+                     'like': like_str,
+                     'timeframe': timeframe})
+        return query
 
     def connect_vnic_to_vswitch(self, vswitch_name, switch_port_name):
         port, found = self._get_switch_port_allocation(switch_port_name, True)

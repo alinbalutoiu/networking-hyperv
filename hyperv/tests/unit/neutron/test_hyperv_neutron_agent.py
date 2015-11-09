@@ -416,9 +416,12 @@ class TestHyperVNeutronAgent(base.BaseTestCase):
             mock.sentinel.port_id)
 
     def test_treat_devices_added_returns_true_for_missing_device(self):
+        self.agent._added_ports = set([mock.sentinel.port_id])
         attrs = {'get_devices_details_list.side_effect': Exception()}
         self.agent.plugin_rpc.configure_mock(**attrs)
-        self.assertTrue(self.agent._treat_devices_added([{}]))
+        self.agent._treat_devices_added()
+
+        self.assertIn(mock.sentinel.port_id, self.agent._added_ports)
 
     def mock_treat_devices_added(self, details, func_name):
         """Mock treat devices added.
@@ -430,42 +433,71 @@ class TestHyperVNeutronAgent(base.BaseTestCase):
         attrs = {'get_devices_details_list.return_value': [details]}
         self.agent.plugin_rpc.configure_mock(**attrs)
         with mock.patch.object(self.agent, func_name) as func:
-            self.assertFalse(self.agent._treat_devices_added([{}]))
+            self.agent._treat_devices_added()
         return func.called
 
     def test_treat_devices_added_updates_known_port(self):
-        details = mock.MagicMock()
-        details.__contains__.side_effect = lambda x: True
+        self.agent._added_ports = set([mock.sentinel.port_id])
+        details = {'device': mock.sentinel.port_id,
+                   'port_id': mock.sentinel.port_id,
+                   'network_id': mock.sentinel.network_id,
+                   'network_type': mock.sentinel.network_type,
+                   'physical_network': mock.sentinel.physical_network,
+                   'segmentation_id': mock.sentinel.segmentation_id,
+                   'admin_state_up': mock.sentinel.admin_state_up}
         with mock.patch.object(self.agent.plugin_rpc,
                                "update_device_up") as func:
             self.assertTrue(self.mock_treat_devices_added(details,
                                                           '_treat_vif_port'))
             self.assertTrue(func.called)
+            self.assertNotIn(mock.sentinel.port_id, self.agent._added_ports)
 
     def test_treat_devices_added_missing_port_id(self):
-        details = mock.MagicMock()
-        details.__contains__.side_effect = lambda x: False
+        self.agent._added_ports = set([mock.sentinel.port_id])
+        details = {'device': mock.sentinel.port_id}
         with mock.patch.object(self.agent.plugin_rpc,
                                "update_device_up") as func:
             self.assertFalse(self.mock_treat_devices_added(details,
                                                            '_treat_vif_port'))
             self.assertFalse(func.called)
+            self.assertNotIn(mock.sentinel.port_id, self.agent._added_ports)
 
-    def test_treat_devices_removed_returns_true_for_missing_device(self):
+    def test_treat_devices_removed_exception(self):
+        self.agent._removed_ports = set([mock.sentinel.port_id])
         attrs = {'update_device_down.side_effect': Exception()}
         self.agent.plugin_rpc.configure_mock(**attrs)
-        self.assertTrue(self.agent._treat_devices_removed([{}]))
+        self.agent._treat_devices_removed()
+
+        self.agent.plugin_rpc.update_device_down.assert_called_once_with(
+            self.agent.context, mock.sentinel.port_id,
+            self.agent.agent_id, self.agent._host)
+        self.assertIn(mock.sentinel.port_id, self.agent._removed_ports)
 
     def mock_treat_devices_removed(self, port_exists):
+        self.agent._removed_ports = set([mock.sentinel.port_id])
         details = dict(exists=port_exists)
         attrs = {'update_device_down.return_value': details}
         self.agent.plugin_rpc.configure_mock(**attrs)
         with mock.patch.object(self.agent, '_port_unbound') as func:
-            self.assertFalse(self.agent._treat_devices_removed([{}]))
+            self.agent._treat_devices_removed()
         self.assertEqual(func.called, not port_exists)
+        self.assertEqual(
+            self.agent.sec_groups_agent.remove_devices_filter.called,
+            not port_exists)
+        self.assertNotIn(mock.sentinel.port_id, self.agent._removed_ports)
 
     def test_treat_devices_removed_unbinds_port(self):
         self.mock_treat_devices_removed(False)
 
     def test_treat_devices_removed_ignores_missing_port(self):
         self.mock_treat_devices_removed(False)
+
+    def test_process_added_port_event(self):
+        self.agent._added_ports = set()
+        self.agent._process_added_port_event(mock.sentinel.port_id)
+        self.assertIn(mock.sentinel.port_id, self.agent._added_ports)
+
+    def test_process_removed_port_event(self):
+        self.agent._removed_ports = set([])
+        self.agent._process_removed_port_event(mock.sentinel.port_id)
+        self.assertIn(mock.sentinel.port_id, self.agent._removed_ports)
