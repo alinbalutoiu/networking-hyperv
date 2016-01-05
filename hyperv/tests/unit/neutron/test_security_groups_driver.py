@@ -35,6 +35,7 @@ class SecurityGroupRuleTestHelper(base.BaseTestCase):
     _FAKE_ACTION = sg_driver.ACL_PROP_MAP['action']['allow']
     _FAKE_DEST_IP_PREFIX = '10.0.0.0/24'
     _FAKE_SOURCE_IP_PREFIX = '10.0.1.0/24'
+    _FAKE_MEMBER_IP = '10.0.0.1'
     _FAKE_IPV6_LEN128_IP = 'fddd:cafd:e664:0:f816:3eff:fe8d:59d2/128'
 
     _FAKE_PORT_MIN = 9001
@@ -47,6 +48,15 @@ class SecurityGroupRuleTestHelper(base.BaseTestCase):
             'protocol': self._FAKE_PROTOCOL,
             'dest_ip_prefix': self._FAKE_DEST_IP_PREFIX,
             'source_ip_prefix': self._FAKE_SOURCE_IP_PREFIX,
+            'port_range_min': self._FAKE_PORT_MIN,
+            'port_range_max': self._FAKE_PORT_MAX
+        }
+
+    def _create_security_group_template(self):
+        return {
+            'direction': self._FAKE_DIRECTION,
+            'ethertype': self._FAKE_ETHERTYPE,
+            'protocol': self._FAKE_PROTOCOL,
             'port_range_min': self._FAKE_PORT_MIN,
             'port_range_max': self._FAKE_PORT_MAX
         }
@@ -72,31 +82,53 @@ class TestHyperVSecurityGroupsDriverMixin(SecurityGroupRuleTestHelper):
         self._driver._utils = mock.MagicMock()
         self._driver._sg_gen = mock.MagicMock()
 
-    @mock.patch.object(sg_driver.HyperVSecurityGroupsDriverMixin,
+    @mock.patch.object(sg_driver.HyperVSecurityGroupsDriver,
+                       '_generate_rules')
+    @mock.patch.object(sg_driver.HyperVSecurityGroupsDriver,
                        '_create_port_rules')
     @mock.patch.object(sg_driver.HyperVSecurityGroupsDriverMixin,
                        '_add_sg_port_rules')
-    def test_prepare_port_filter(self, mock_add_rules, mock_create_rules):
+    def test_prepare_port_filter(self, mock_add_rules, mock_create_rules,
+                                 mock_gen_rules):
         mock_port = self._get_port()
         mock_create_default = self._driver._sg_gen.create_default_sg_rules
+
+        fake_rule = self._create_security_rule()
+        self._driver._get_rule_remote_address = mock.MagicMock(
+            return_value=self._FAKE_SOURCE_IP_PREFIX)
+        mock_gen_rules.return_value = {mock_port['id']: [fake_rule]}
 
         self._driver.prepare_port_filter(mock_port)
 
         self.assertEqual(mock_port,
                          self._driver._security_ports[self._FAKE_DEVICE])
-
+        mock_gen_rules.assert_called_with([self._driver._security_ports
+                                          [self._FAKE_DEVICE]])
         mock_add_rules.assert_called_once_with(
             self._FAKE_ID, mock_create_default.return_value)
-        self._driver._create_port_rules.assert_called_once_with(
-            self._FAKE_ID, mock_port['security_group_rules'])
 
-    def test_update_port_filter(self):
+#         self._driver._create_port_rules.assert_called_with(
+#             self._FAKE_ID, mock_port['security_group_rules'])
+        self._driver._create_port_rules.assert_called_with(
+            self._FAKE_ID, [fake_rule])
+
+    @mock.patch.object(sg_driver.HyperVSecurityGroupsDriver,
+                       '_generate_rules')
+    def test_update_port_filter(self, mock_gen_rules):
         mock_port = self._get_port()
         new_mock_port = self._get_port()
         new_mock_port['id'] += '2'
         new_mock_port['security_group_rules'][0]['ethertype'] += "2"
 
+        fake_rule_new = self._create_security_rule()
+        self._driver._get_rule_remote_address = mock.MagicMock(
+            return_value=self._FAKE_SOURCE_IP_PREFIX)
+
+        mock_gen_rules.return_value = {new_mock_port['id']: [fake_rule_new]}
+
         self._driver._security_ports[mock_port['device']] = mock_port
+        self._driver._sec_group_rules[new_mock_port['id']] = []
+
         self._driver._create_port_rules = mock.MagicMock()
         self._driver._remove_port_rules = mock.MagicMock()
         self._driver.update_port_filter(new_mock_port)
@@ -104,18 +136,10 @@ class TestHyperVSecurityGroupsDriverMixin(SecurityGroupRuleTestHelper):
         self._driver._remove_port_rules.assert_called_once_with(
             mock_port['id'], mock_port['security_group_rules'])
         self._driver._create_port_rules.assert_called_once_with(
-            new_mock_port['id'], new_mock_port['security_group_rules'])
+            new_mock_port['id'], [new_mock_port['security_group_rules'][0],
+                                  fake_rule_new])
         self.assertEqual(new_mock_port,
                          self._driver._security_ports[new_mock_port['device']])
-
-    @mock.patch.object(sg_driver.HyperVSecurityGroupsDriverMixin,
-                       'prepare_port_filter')
-    def test_update_port_filter_new_port(self, mock_method):
-        mock_port = self._get_port()
-        self._driver.prepare_port_filter = mock.MagicMock()
-        self._driver.update_port_filter(mock_port)
-
-        self._driver.prepare_port_filter.assert_called_once_with(mock_port)
 
     def test_remove_port_filter(self):
         mock_port = self._get_port()
@@ -204,6 +228,29 @@ class TestHyperVSecurityGroupsDriverMixin(SecurityGroupRuleTestHelper):
     def test_remove_sg_port_rules_empty(self):
         self._driver._remove_sg_port_rules(mock.sentinel.id, [])
         self.assertFalse(self._driver._utils.remove_security_rules.called)
+
+    def test__select_sg_rules_for_port(self):
+        mock_port = self._get_port()
+        mock_port['fixed_ips'] = [mock.MagicMock()],
+        mock_port['security_groups'] = [self._FAKE_ID]
+
+        fake_rule = self._create_security_group_template()
+        fake_rule['direction'] = 'ingress'
+        self._driver._sg_rule_templates[self._FAKE_ID] = [fake_rule]
+
+        # test without remote_group_id
+        rule_list = self._driver._select_sg_rules_for_port(mock_port,
+                                                           'ingress')
+        self.assertEqual(self._FAKE_ID, rule_list[0]['security_group_id'])
+
+        fake_rule['remote_group_id'] = self._FAKE_ID
+        self._driver._sg_members[self._FAKE_ID] = ({self._FAKE_ETHERTYPE:
+                                                    [self._FAKE_MEMBER_IP]
+                                                    })
+        rule_list = self._driver._select_sg_rules_for_port(mock_port,
+                                                           'ingress')
+        self.assertEqual(self._FAKE_ID, rule_list[0]['security_group_id'])
+        self.assertEqual('10.0.0.1/32', rule_list[0]['source_ip_prefix'])
 
     def _get_port(self):
         return {
