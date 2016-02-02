@@ -125,6 +125,7 @@ class TestHyperVSecurityGroupsDriverMixin(SecurityGroupRuleTestHelper):
         self._driver.remove_port_filter(mock_port)
         self.assertNotIn(mock_port['device'], self._driver._security_ports)
         self.assertNotIn(mock_port['id'], self._driver._sec_group_rules)
+        self._driver._utils.clear_port_sg_acls_cache(mock_port['id'])
 
     @mock.patch.object(sg_driver.HyperVSecurityGroupsDriverMixin,
                        '_add_sg_port_rules')
