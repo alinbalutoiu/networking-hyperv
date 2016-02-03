@@ -22,6 +22,10 @@ from eventlet import greenthread
 from hyperv.common.i18n import _  # noqa
 from hyperv.neutron import utils
 
+# Check needed for unit testing on Unix
+if sys.platform == 'win32':
+    import wmi
+
 
 class HyperVUtilsV2(utils.HyperVUtils):
 

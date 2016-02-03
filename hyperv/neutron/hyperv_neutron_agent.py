@@ -47,6 +47,7 @@ nvgre_opts = [
 
 CONF = cfg.CONF
 CONF.register_opts(nvgre_opts, "NVGRE")
+CONF.import_group('NVGRE', 'hyperv.neutron.config')
 
 LOG = logging.getLogger(__name__)
 
